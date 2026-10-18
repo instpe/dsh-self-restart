@@ -46,7 +46,7 @@ New-Item -ItemType Junction `
   -Target "<CHECKOUT>"
 
 # 2. profile 清单：dependencies 增加 "link:<CHECKOUT>"，
-#    dsh.profile.bundles 追加 "@local/dsh-self-restart"
+#    dsh.profile.bundles 追加 "@instpe/dsh-self-restart"
 
 # 3. 重启一次宿主
 ```

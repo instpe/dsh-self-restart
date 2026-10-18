@@ -2,7 +2,7 @@
 
 | 项目 | 内容 |
 | --- | --- |
-| 插件标识 | `@local/dsh-self-restart` |
+| 插件标识 | `@instpe/dsh-self-restart` |
 | 版本 | 0.1.0 |
 | 文档性质 | 设计说明（实现与维护依据） |
 | 适用范围 | DeepSeek Harness Web profile（`dsh web`） |
@@ -371,7 +371,7 @@ powershell.exe -NoProfile -WindowStyle Hidden -Command "& '<file>' '<arg>' ..."
 
 ```json
 {
-  "name": "@local/dsh-self-restart",
+  "name": "@instpe/dsh-self-restart",
   "type": "module",
   "exports": {
     ".": "./index.js",
@@ -419,10 +419,10 @@ powershell.exe -NoProfile -WindowStyle Hidden -Command "& '<file>' '<arg>' ..."
 
 ## 10. 部署
 
-1. 建立目录联接：`~/.dsh/profiles/web/node_modules/@local/dsh-self-restart` → `<CHECKOUT>`（本仓库的本地检出路径）。
+1. 建立目录联接：`~/.dsh/profiles/web/node_modules/@instpe/dsh-self-restart` → `<CHECKOUT>`（本仓库的本地检出路径）。
 2. 在 `~/.dsh/profiles/web/package.json` 中：
-   - `dependencies` 增加 `"@local/dsh-self-restart": "link:<CHECKOUT>"`；
-   - `dsh.profile.bundles` 追加 `"@local/dsh-self-restart"`。
+   - `dependencies` 增加 `"@instpe/dsh-self-restart": "link:<CHECKOUT>"`；
+   - `dsh.profile.bundles` 追加 `"@instpe/dsh-self-restart"`。
 3. 不向 profile 的 `cordis.patch.yml` 插入同名行：插件自带 `cordis.patch.yml`，重复插入会产生同 id 双行。
 4. 重启一次宿主使装配生效。
 

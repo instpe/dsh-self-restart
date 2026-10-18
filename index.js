@@ -1,5 +1,5 @@
 /**
- * @local/dsh-self-restart 宿主半。
+ * @instpe/dsh-self-restart 宿主半。
  *
  * 能力：会话智能体通过 `restart_self` 工具触发宿主进程重启；重启完成后，由前端半
  * 从重启标记中取出消息并投递回原会话。设计说明见 docs/design.md。

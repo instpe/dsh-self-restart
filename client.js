@@ -1,5 +1,5 @@
 /**
- * @local/dsh-self-restart 前端半。
+ * @instpe/dsh-self-restart 前端半。
  *
  * 职责：宿主重启完成后，把重启标记中的消息作为一条用户消息投递回原会话。
  *
@@ -13,7 +13,7 @@
   'use strict'
 
   /** 浏览器模块标识，须与 package.json 的包名一致。 */
-  const MODULE_ID = '@local/dsh-self-restart'
+  const MODULE_ID = '@instpe/dsh-self-restart'
 
   /** 标记接口前缀，与宿主入口保持同值。 */
   const PREFIX = '/dsh-self-restart/api'

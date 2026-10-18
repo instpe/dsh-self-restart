@@ -1,9 +1,25 @@
 {
-  "name": "@local/dsh-self-restart",
+  "name": "@instpe/dsh-self-restart",
   "version": "0.1.0",
-  "private": true,
   "type": "module",
-  "description": "会话智能体自重启：重启宿主进程，并在重启完成后向原会话投递一条消息。",
+  "description": "DSH plugin: a session agent restarts its own host process and receives a message in the same session once it is back. · 会话智能体自重启：重启宿主进程，并在重启完成后向原会话投递一条消息。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "restart",
+    "self-restart",
+    "session-continuation"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/instpe/dsh-self-restart#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/instpe/dsh-self-restart.git"
+  },
+  "bugs": {
+    "url": "https://github.com/instpe/dsh-self-restart/issues"
+  },
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",
@@ -39,5 +55,9 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   }
 }

@@ -3,5 +3,5 @@
 # 设计说明见 docs/design.md。
 - insert:
     - id: dsh-self-restart
-      name: '@local/dsh-self-restart'
+      name: '@instpe/dsh-self-restart'
       config: {}
