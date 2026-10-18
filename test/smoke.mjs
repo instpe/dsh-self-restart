@@ -201,23 +201,38 @@ const file = markerFile(config)
   check('命令写入标记与停用分支')
 }
 
-// 7. 接口：读取与删除
+// 7. 接口：本进程写下的标记不可见，外来标记可见且可删
 {
   const handler = routes[0].handler
-  const pending = fakeResponse()
-  await handler({ url: '/dsh-self-restart/api/pending', method: 'GET' }, pending)
-  assert.equal(pending.status, 200)
-  const listed = JSON.parse(pending.body)
+
+  // 本进程写的标记必须隐藏：否则前端会在重启发生前就投递，
+  // 消息被塞进旧 agent 的内存队列并随进程消失（真实故障）。
+  const own = fakeResponse()
+  await handler({ url: '/dsh-self-restart/api/pending', method: 'GET' }, own)
+  assert.equal(own.status, 200)
+  assert.deepEqual(JSON.parse(own.body).entries, [], '本进程写下的标记不得对外暴露')
+
+  // 模拟上一个进程留下的标记：pid 不同即视为可投递
+  writeEntries(file, [{
+    id: 'from-previous-boot',
+    sessionId: 'session-1',
+    message: '已重启',
+    scheduledAt: Date.now(),
+    pid: process.pid + 1,
+    source: 'restart_self',
+  }])
+  const foreign = fakeResponse()
+  await handler({ url: '/dsh-self-restart/api/pending', method: 'GET' }, foreign)
+  const listed = JSON.parse(foreign.body)
   assert.equal(listed.entries.length, 1)
   assert.deepEqual(Object.keys(listed.entries[0]).sort(), ['id', 'message', 'scheduledAt', 'sessionId'])
-  const id = listed.entries[0].id
 
   const missing = fakeResponse()
   await handler(fakePostRequest('/dsh-self-restart/api/done', {}), missing)
   assert.equal(missing.status, 400)
 
   const done = fakeResponse()
-  await handler(fakePostRequest('/dsh-self-restart/api/done', { id }), done)
+  await handler(fakePostRequest('/dsh-self-restart/api/done', { id: listed.entries[0].id }), done)
   assert.equal(done.status, 200)
   assert.equal(JSON.parse(done.body).removed, 1)
   assert.equal(readEntries(file, config.maxAgeMs).length, 0)
@@ -225,7 +240,7 @@ const file = markerFile(config)
   const unknown = fakeResponse()
   await handler({ url: '/dsh-self-restart/api/nope', method: 'GET' }, unknown)
   assert.equal(unknown.status, 404)
-  check('标记接口的读取、删除与错误分支')
+  check('标记的写入者隔离、读取、删除与错误分支')
 }
 
 // 8. 超期条目被剔除，损坏文件被隔离

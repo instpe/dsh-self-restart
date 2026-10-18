@@ -168,6 +168,7 @@ export const inject = ['tools', 'agents', 'sessions']
 | 读取 | 剔除 `now - scheduledAt > maxAgeMs` 的条目并回写 |
 | 损坏处理 | JSON 解析失败时备份为 `<file>.bad` 并视为空集合：损坏的标记不得阻断重启能力 |
 | 字段校验 | 缺少 `id` / `sessionId` / `message` / `scheduledAt` 的条目在读取时丢弃 |
+| **可见性** | 条目带写入者 `pid`；HTTP 接口只返回 `entry.pid !== process.pid` 的条目 |
 
 ```ts
 interface PendingEntry {
@@ -175,9 +176,14 @@ interface PendingEntry {
   sessionId: string     // exec.agent.session.id
   message: string
   scheduledAt: number   // Date.now()
+  pid?: number          // 写入它的进程；缺省视为更早版本写入（外部进程）
   source: 'restart_self'
 }
 ```
+
+**可见性为什么必须按进程隔离。** 标记在工具返回时即落盘，而重启要等这一轮结束才发生（§6.4）。若此时就对外可见，前端会在 1.5s 内读到并立即 `prompt`，消息被送进**仍然存活**的旧 agent 的内存队列（`queue` 模式 + 运行中），随后进程终止、队列消失；同时客户端因拿到 `ok: true` 已删除该标记——消息两头落空，会话里既不出现也不续跑。这是本插件曾经的实现缺陷（用户实测复现）。
+
+按写入者 `pid` 过滤后：本进程写下的标记对前端不可见，替换进程启动后 `process.pid` 不同，条目才变为可投递，此时会话必然处于冷态（重启发起的第一个请求会按会话记录的预设 resume）。没有 `pid` 字段的条目来自更早版本，按外部写入处理。
 
 ### 6.3 工具 `restart_self`
 
@@ -270,12 +276,12 @@ powershell.exe -NoProfile -WindowStyle Hidden -Command "& '<file>' '<arg>' ..."
 
 | 方法 | 路径 | 语义 |
 | --- | --- | --- |
-| `GET` | `/dsh-self-restart/api/pending` | 剔除超期条目后返回 `{entries}` |
+| `GET` | `/dsh-self-restart/api/pending` | 剔除超期条目后，返回**非本进程写入**的条目 `{entries}`（§6.2 可见性） |
 | `POST` | `/dsh-self-restart/api/done` | 请求体 `{id:string}`，删除该条，返回 `{ok:true, removed:0|1}` |
 
 错误分支：`done` 缺少 `id` 返回 400；其它路径返回 404。响应统一为 `application/json; charset=utf-8` 且 `cache-control: no-store`。请求体上限 64 KiB。
 
-两条接口均无进程控制语义，故不设来源围栏；重启只能由工具或用户手工执行。
+两条接口均无进程控制语义，故不设来源围栏；重启只能由工具或用户手工执行。`done` 不校验写入者：删除一条外来标记是投递完成的正常收尾。
 
 ### 6.7 续跑投递
 
@@ -378,6 +384,7 @@ powershell.exe -NoProfile -WindowStyle Hidden -Command "& '<file>' '<arg>' ..."
 | B10 | 标记超期或会话已删除 | 读取时剔除，不投递 |
 | B11 | 预设首轮工具收窄 | 仅影响会话首个请求；完成过一次工具调用的会话可见全部工具 |
 | B12 | 命令行含双引号或 `%` | Windows 包装无法保真，退回直接 detached 启动；代价为替换进程的控制台子进程可能显示窗口 |
+| B13 | 标记在本进程内已写入、重启尚未发生 | 按写入者 `pid` 对外隐藏（§6.2）：否则消息会被塞进旧 agent 的内存队列并随进程消失 |
 
 ## 9. 安全与权限边界
 
@@ -400,7 +407,7 @@ powershell.exe -NoProfile -WindowStyle Hidden -Command "& '<file>' '<arg>' ..."
 
 ### 11.1 自检 `node test/smoke.mjs`
 
-不触碰运行中的宿主，覆盖 9 项：配置规范化、启动命令行重建与平台包装、工具/命令/提示段/路由注册、工具写标记与幂等调度、失败路径、命令写标记与停用分支、接口读取与删除、超期剔除与损坏隔离、helper 真实拉起子进程。
+不触碰运行中的宿主，覆盖 9 项：配置规范化、启动命令行重建与平台包装、工具/命令/提示段/路由注册、工具写标记与幂等调度、失败路径、命令写标记与停用分支、标记的写入者隔离与接口读写、超期剔除与损坏隔离、helper 真实拉起子进程。
 
 ### 11.2 装配验证
 

@@ -186,6 +186,24 @@ function publicEntry(entry) {
   return { id: entry.id, sessionId: entry.sessionId, message: entry.message, scheduledAt: entry.scheduledAt }
 }
 
+/**
+ * 一条标记只有在**写入它的进程已经不在**之后才可投递。
+ *
+ * 为什么必须这样：标记在工具返回时就已落盘，而重启要等这一轮结束才发生。
+ * 若此时就对外可见，前端会立刻 `prompt`，消息被塞进旧 agent 的内存队列
+ * （`queue` 模式 + 运行中），随后进程终止、队列消失，而客户端已因 `ok:true`
+ * 删掉标记——消息两头落空。按写入者 pid 过滤后，本进程写下的标记对前端不可见，
+ * 只有替换进程启动后才会被看到并投递。
+ *
+ * 没有 `pid` 字段的条目来自更早的版本，按「外部写入」处理。
+ * @param {object} entry - 候选条目。
+ * @param {number} pid - 当前进程标识。
+ * @returns {boolean} 是否可投递。
+ */
+function deliverable(entry, pid) {
+  return entry.pid !== pid
+}
+
 /** 常驻提示段：让模型在相关意图下想到该工具，而不只依赖 schema 被偶然读到。 */
 const GUIDANCE = 'restart_self：重启 dsh 宿主进程。当前进程退出后，以完全相同的命令行拉起新进程，'
   + '端口与命令行参数保持不变；重启完成后本会话会收到一条消息（默认「已重启」）。'
@@ -257,6 +275,7 @@ export function apply(ctx, config) {
       sessionId: String(agent.session.id),
       message,
       scheduledAt: Date.now(),
+      pid: process.pid,
       source: 'restart_self',
     }, resolved.maxAgeMs)
     const port = resolved.port ?? ctx.get('webServer')?.port ?? null
@@ -347,7 +366,9 @@ export function apply(ctx, config) {
       const url = new URL(request.url ?? '/', 'http://localhost')
       const path = url.pathname.slice(PREFIX.length)
       if (path === '/api/pending' && request.method === 'GET') {
-        json(response, 200, { entries: readEntries(file, resolved.maxAgeMs).map(publicEntry) })
+        const visible = readEntries(file, resolved.maxAgeMs)
+          .filter(entry => deliverable(entry, process.pid))
+        json(response, 200, { entries: visible.map(publicEntry) })
         return
       }
       if (path === '/api/done' && request.method === 'POST') {
