@@ -4,3 +4,6 @@ node_modules/
 pending.json
 .DS_Store
 Thumbs.db
+
+.idea/
+
