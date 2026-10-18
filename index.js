@@ -15,7 +15,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { restartLogPaths, scheduleRestart } from './restart.js'
+import { PORT_WAIT_MS, restartLogPaths, scheduleRestart } from './restart.js'
 
 /** 宿主插件名。 */
 export const name = 'self-restart'
@@ -205,24 +205,48 @@ function deliverable(entry, pid) {
 }
 
 /** 常驻提示段：让模型在相关意图下想到该工具，而不只依赖 schema 被偶然读到。 */
-const GUIDANCE = 'restart_self：重启 dsh 宿主进程。当前进程退出后，以完全相同的命令行拉起新进程，'
-  + '端口与命令行参数保持不变；重启完成后本会话会收到一条消息（默认「已重启」）。'
-  + '用户要求重启 dsh、要求让插件或配置改动生效、或你判定必须重启才能继续时，调用它；'
-  + '调用后不要再补一句「请重启」。用户也可以直接在输入框输入 /restart，效果相同。'
+const GUIDANCE = 'restart_self：安排一次 dsh 宿主进程重启。调用当时进程仍在运行——重启发生在本轮回复结束之后，'
+  + '返回值里的 restarted 为 false；新进程用完全相同的命令行与端口起身，重启完成后本会话会收到一条消息'
+  + '（默认「已重启」）。用户要求重启 dsh、要求让插件或配置改动生效、或你判定必须重启才能继续时，调用它。'
+  + '调用后不要对用户宣称「已重启」，也不要再说「请重启」——消息会自己到；用户也可以直接在输入框输入 /restart。'
 
-/** 工具的输出契约。 */
+/**
+ * 工具的输出契约。
+ *
+ * `restarted: false` 是这份返回值里最重要的一位：调用当时进程仍在运行，重启发生在
+ * 本轮回复结束之后。缺少这一位时，模型会把紧随其后的 `deliverAfterRestart` 读成
+ * 「已经重启完成」，从而对用户谎报状态，或在同一轮里继续做重启后才有意义的事。
+ */
 const OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['ok', 'pid', 'message', 'sessionId', 'logPath'],
+  required: ['ok', 'restarted', 'pid', 'sessionId', 'deliverAfterRestart', 'timing', 'note', 'logPath'],
   properties: {
     ok: { type: 'boolean' },
+    restarted: { type: 'boolean' },
     pid: { type: 'integer' },
-    message: { type: 'string' },
     sessionId: { type: 'string' },
+    deliverAfterRestart: { type: 'string' },
+    timing: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['afterTurnMs', 'idleTimeoutMs', 'portWaitMs'],
+      properties: {
+        afterTurnMs: { type: 'integer' },
+        idleTimeoutMs: { type: 'integer' },
+        portWaitMs: { type: 'integer' },
+      },
+    },
+    note: { type: 'string' },
     logPath: { type: 'string' },
   },
 }
+
+/** 返回给模型的状态说明：说清「尚未重启」与随后的等待，避免它谎报完成。 */
+const PENDING_NOTE = '尚未重启。进程会在本轮回复结束、会话刷盘后被替换：先等待 afterTurnMs，'
+  + '若久不静默最多等 idleTimeoutMs；helper 还要等端口释放（上限 portWaitMs），'
+  + '随后的冷启动需要数秒到数十秒。本轮回复可能在替换时被截断，属正常。'
+  + '重启完成后本会话会收到 deliverAfterRestart 这条消息，不要在此前对用户宣称已重启，也不要重复调用。'
 
 /**
  * 挂载插件：注册 `restart_self` 工具与两条标记接口。
@@ -265,10 +289,10 @@ export function apply(ctx, config) {
    * 工具与 `/restart` 命令共用此入口，两者的差异仅在触发者与送达方式。
    * @param {object} agent - 触发重启的会话智能体。
    * @param {string} message - 重启后投递进该会话的文本。
-   * @returns {{ message: string, sessionId: string, logPath: string }} 本进程的调度信息。
+   * @returns {{ deliverAfterRestart: string, sessionId: string, logPath: string, repeated: boolean }} 本进程的调度信息。
    */
   function restartOnce(agent, message) {
-    if (scheduled !== null) return scheduled
+    if (scheduled !== null) return { ...scheduled, repeated: true }
     const logs = restartLogPaths()
     const entry = appendEntry(file, {
       id: randomUUID(),
@@ -279,18 +303,27 @@ export function apply(ctx, config) {
       source: 'restart_self',
     }, resolved.maxAgeMs)
     const port = resolved.port ?? ctx.get('webServer')?.port ?? null
-    scheduled = { message: entry.message, sessionId: entry.sessionId, logPath: logs.err }
+    scheduled = { deliverAfterRestart: entry.message, sessionId: entry.sessionId, logPath: logs.err }
     arm(agent, port, logs)
-    return scheduled
+    return { ...scheduled, repeated: false }
+  }
+
+  /** 等待参数：告知模型它要等多久，而不是让它以为重启已经完成。 */
+  const timing = {
+    afterTurnMs: resolved.readyDelayMs,
+    idleTimeoutMs: resolved.idleTimeoutMs,
+    portWaitMs: PORT_WAIT_MS,
   }
 
   const tool = {
     name: 'restart_self',
-    description: '重启当前 DeepSeek Harness 宿主进程：本进程退出后以相同命令行与端口拉起新进程，'
-      + '重启完成后本会话会收到一条消息（默认「已重启」）。'
+    description: '安排一次宿主进程重启：本轮回复结束后，进程被相同命令行与端口的新进程替换。'
+      + '返回时尚未重启（restarted: false）；重启完成后本会话会收到 deliverAfterRestart 这条消息。'
       + '用户要求重启 dsh、让插件或配置改动生效，或你判定必须重启才能继续时调用。'
-      + ' / Restart the host process in place; this session receives a message after it comes back. '
-      + 'Call it when the user asks for a restart, when a change needs a restart to take effect, or when you judge a restart is required.',
+      + ' / Schedule an in-place restart of the host process. It happens AFTER this turn ends, so the '
+      + 'immediate result reports restarted: false; the delivered text arrives in this session once the '
+      + 'new process is up. Call it when the user asks for a restart, when a change needs one to take effect, '
+      + 'or when you judge a restart is required.',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -321,9 +354,15 @@ export function apply(ctx, config) {
       const state = restartOnce(agent, message)
       return Promise.resolve({
         ok: true,
+        // 调用当时进程仍在运行：这一位存在的唯一目的就是阻止模型把「已排程」说成「已重启」。
+        restarted: false,
         pid: process.pid,
-        message: state.message,
         sessionId: state.sessionId,
+        deliverAfterRestart: state.deliverAfterRestart,
+        timing,
+        note: state.repeated
+          ? '本进程的重启已排程，本次调用不产生第二次重启，参数保持不变。' + PENDING_NOTE
+          : PENDING_NOTE,
         logPath: state.logPath,
       })
     },
@@ -354,7 +393,9 @@ export function apply(ctx, config) {
         const state = restartOnce(invocation.agent, typed === '' ? resolved.message : typed)
         return {
           kind: 'success',
-          text: `已安排重启（pid ${process.pid}）；本会话将收到「${state.message}」。日志：${state.logPath}`,
+          // 命令由人触发，也必须说清「尚未重启」：页面会先重连、再出现投递消息。
+          text: `已安排重启：当前进程（pid ${process.pid}）将在几秒内被相同命令行与端口的新进程替换，`
+            + `替换后本会话收到「${state.deliverAfterRestart}」。页面会短暂断开并自动重连。日志：${state.logPath}`,
         }
       },
     }), 'self-restart: command')

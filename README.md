@@ -68,7 +68,22 @@ New-Item -ItemType Junction `
 restart_self({ message: "已重启" })   # 模型：由智能体调用
 ```
 
-两条路径都立即返回进程标识与日志路径；当前轮结束后宿主被替换。浏览器重新连接后，原会话出现该消息并产生一轮回复。
+两条路径都是「先安排、后发生」：调用当即返回，**此刻尚未重启**。工具返回值里 `restarted` 恒为 `false`，并用 `timing` 说明随后的等待：
+
+```json
+{
+  "ok": true,
+  "restarted": false,
+  "pid": 20532,
+  "sessionId": "session-…",
+  "deliverAfterRestart": "已重启",
+  "timing": { "afterTurnMs": 1500, "idleTimeoutMs": 15000, "portWaitMs": 30000 },
+  "note": "尚未重启。进程会在本轮回复结束、会话刷盘后被替换……",
+  "logPath": "…\\Temp\\dsh-self-restart-….err.log"
+}
+```
+
+`restarted: false` 是刻意留的：只有它能让模型不把「已排程」说成「已重启」。本轮回复可能在替换时被截断，属正常；浏览器重连后，原会话收到 `deliverAfterRestart` 并产生一轮回复。
 
 ## 验证
 

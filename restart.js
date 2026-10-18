@@ -21,6 +21,9 @@ import { dirname, join, resolve } from 'node:path'
 /** 可作为宿主入口重放的路径形态：bin.js、bin.ts 与 PATH 上的 dsh 可执行文件。 */
 const ENTRY = /[\\/](?:bin\.(?:js|ts)|dsh)$/u
 
+/** helper 等待旧端口释放的上限；工具返回值据此告知模型它需要等多久。 */
+export const PORT_WAIT_MS = 30000
+
 /**
  * 由当前进程的 argv 重建启动命令行。
  * @param {string[]} argv - 进程参数向量，默认取 process.argv。
@@ -136,9 +139,9 @@ export function helperSource(spawned, launch, logs, port) {
     'const main = async () => {',
     '  note(`helper up (pid ${process.pid}) for port ${port}`)',
     '  if (port) {',
-    '    const until = Date.now() + 30000',
+    `    const until = Date.now() + ${PORT_WAIT_MS}`,
     '    while (Date.now() < until && await listening()) await sleep(250)',
-    '    if (await listening()) note(`port ${port} was still in use after 30s; starting anyway`)',
+    `    if (await listening()) note(\`port \${port} was still in use after ${PORT_WAIT_MS / 1000}s; starting anyway\`)`,
     '    await sleep(300)',
     '  } else {',
     '    await sleep(1500)',

@@ -221,13 +221,13 @@ interface PendingEntry {
 ### 6.3.2 常驻提示段
 
 ```
-restart_self：重启 dsh 宿主进程。当前进程退出后，以完全相同的命令行拉起新进程，
-端口与命令行参数保持不变；重启完成后本会话会收到一条消息（默认「已重启」）。
-用户要求重启 dsh、要求让插件或配置改动生效、或你判定必须重启才能继续时，调用它；
-调用后不要再补一句「请重启」。用户也可以直接在输入框输入 /restart，效果相同。
+restart_self：安排一次 dsh 宿主进程重启。调用当时进程仍在运行——重启发生在本轮回复结束之后，
+返回值里的 restarted 为 false；新进程用完全相同的命令行与端口起身，重启完成后本会话会收到一条消息
+（默认「已重启」）。用户要求重启 dsh、要求让插件或配置改动生效、或你判定必须重启才能继续时，调用它。
+调用后不要对用户宣称「已重启」，也不要再说「请重启」——消息会自己到；用户也可以直接在输入框输入 /restart。
 ```
 
-该段常驻且只占数行；它同时承担两项职责：告知能力，以及消除「调用后还要叮嘱用户重启」这类噪音。
+该段常驻且只占数行；它承担三项职责：告知能力、说明「尚未重启」的等待期、消除「调用后还要叮嘱用户重启」这类噪音。第三项与 `restart_self` 返回值里的 `restarted: false` 是同一件事的两处表述：提示段负责让模型提前知道语义，返回值负责在调用当场留下不可误读的事实。
 
 ### 6.4 重启调度
 
@@ -309,18 +309,41 @@ powershell.exe -NoProfile -WindowStyle Hidden -Command "& '<file>' '<arg>' ..."
 {
   "type": "object",
   "additionalProperties": false,
-  "required": ["ok", "pid", "message", "sessionId", "logPath"],
+  "required": ["ok", "restarted", "pid", "sessionId", "deliverAfterRestart", "timing", "note", "logPath"],
   "properties": {
-    "ok":        { "type": "boolean" },
-    "pid":       { "type": "integer" },
-    "message":   { "type": "string" },
-    "sessionId": { "type": "string" },
-    "logPath":   { "type": "string" }
+    "ok":                  { "type": "boolean" },
+    "restarted":           { "type": "boolean" },
+    "pid":                 { "type": "integer" },
+    "sessionId":           { "type": "string" },
+    "deliverAfterRestart": { "type": "string" },
+    "timing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["afterTurnMs", "idleTimeoutMs", "portWaitMs"],
+      "properties": {
+        "afterTurnMs":    { "type": "integer" },
+        "idleTimeoutMs":  { "type": "integer" },
+        "portWaitMs":     { "type": "integer" }
+      }
+    },
+    "note":    { "type": "string" },
+    "logPath": { "type": "string" }
   }
 }
 ```
 
-`pid` 为**被终止**的进程标识；`logPath` 为诊断日志路径，位于系统临时目录。
+| 字段 | 含义 |
+| --- | --- |
+| `restarted` | **恒为 `false`**。调用当时进程仍在运行，重启发生在本轮回复结束之后 |
+| `pid` | 将被终止的进程标识 |
+| `deliverAfterRestart` | 重启完成后投递进本会话的文本（原字段名 `message` 已废弃：它紧挨 `ok: true` 会被读成「已重启」） |
+| `timing.afterTurnMs` | 本轮结束到替换之间的等待（`readyDelayMs`） |
+| `timing.idleTimeoutMs` | 等待智能体静默的上限 |
+| `timing.portWaitMs` | helper 等待端口释放的上限（`PORT_WAIT_MS`） |
+| `note` | 模型侧说明：尚未重启、本轮回复可能被截断、不要宣称已重启、不要重复调用；重复调用时前置「已排程」 |
+| `logPath` | 诊断日志路径，位于系统临时目录 |
+
+**为什么必须有 `restarted: false`。** 原返回值是 `{ok:true, message:'已重启', …}`，这个形状把「已排程」与「已完成」混在一起：模型会把 `message` 读成当前状态，于是对用户宣称已经重启，或在同一轮里继续做重启后才有意义的事。显式一位 `restarted: false` 加 `note`，把「等待期」写进返回值的唯一事实来源，而不是靠提示段的劝告。工具描述同样先写「安排一次重启……返回时尚未重启」。
 
 ### 7.1.1 `/restart` 命令
 
@@ -329,10 +352,10 @@ powershell.exe -NoProfile -WindowStyle Hidden -Command "& '<file>' '<arg>' ..."
 | 命令名 | `restart`（输入框输入 `/restart`） |
 | 描述 | 重启 DeepSeek Harness 宿主进程；重启完成后本会话收到一条消息（默认「已重启」） |
 | 入参 | 命令名之后的文本即投递文本；为空时取配置 `message` |
-| 成功返回 | `{kind:'success', text:'已安排重启（pid N）；本会话将收到「…」。日志：…'}` |
+| 成功返回 | `{kind:'success', text:'已安排重启：当前进程（pid N）将在几秒内被替换……页面会短暂断开并自动重连。日志：…'}` |
 | 停用返回 | `{kind:'error', text:'自重启已在插件配置中停用（allowRestart: false）'}` |
 
-命令与工具共用同一调度入口 `restartOnce()`，差异仅在触发者与送达方式：命令由宿主直接执行，不经模型。
+命令与工具共用同一调度入口 `restartOnce()`，差异仅在触发者与送达方式：命令由宿主直接执行，不经模型。命令回执照样写明「尚未重启」——它面向人，页面会先断开再重连。
 
 ### 7.2 HTTP 响应
 
