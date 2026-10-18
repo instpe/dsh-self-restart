@@ -1,0 +1,7 @@
+# dsh-self-restart 装载行。
+# 宿主入口见 index.js，浏览器端入口见 client.js，进程替换链路见 restart.js，
+# 设计说明见 docs/design.md。
+- insert:
+    - id: dsh-self-restart
+      name: '@local/dsh-self-restart'
+      config: {}

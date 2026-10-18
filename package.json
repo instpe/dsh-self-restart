@@ -1,0 +1,43 @@
+{
+  "name": "@local/dsh-self-restart",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "会话智能体自重启：重启宿主进程，并在重启完成后向原会话投递一条消息。",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "restart.js",
+    "client.js",
+    "cordis.patch.yml",
+    "docs/design.md",
+    "README.md",
+    "test/smoke.mjs"
+  ],
+  "meta": {
+    "title": "自重启",
+    "description": "允许会话智能体重启宿主进程，重启完成后在自身会话内收到一条消息。"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  },
+  "scripts": {
+    "test": "node test/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
