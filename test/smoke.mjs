@@ -166,6 +166,20 @@ const file = markerFile(config)
   assert.equal(first.timing.portWaitMs, 30000)
   assert.equal(first.timing.afterTurnMs, 0, '取自测试配置的 readyDelayMs')
   assert.match(first.logPath, /dsh-self-restart-.*\.err\.log$/u)
+  // 返回值的键集合必须与 output.schema 逐字对齐。只断言「某几个字段存在」抓不到
+  // 「schema 已改、execute 仍返回旧字段」这种半途状态——真机上正是这样报错的：
+  // missing required property "value.restarted"; "value.message" is not a declared property。
+  assert.deepEqual(
+    Object.keys(first).sort(),
+    [...tool.output.schema.required].sort(),
+    '返回值键集合必须与 output.schema.required 完全一致',
+  )
+  assert.deepEqual(
+    Object.keys(first.timing).sort(),
+    [...tool.output.schema.properties.timing.required].sort(),
+  )
+  assert.equal(typeof first.restarted, 'boolean')
+  assert.equal(typeof first.note, 'string')
   const second = await tool.execute({ message: '再次' }, exec)
   assert.equal(second.deliverAfterRestart, '已重启', '同一进程只调度一次，重复调用回报首条信息')
   assert.match(second.note, /已排程/u)

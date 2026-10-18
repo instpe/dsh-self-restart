@@ -91,9 +91,11 @@ restart_self({ message: "已重启" })   # 模型：由智能体调用
 node test/smoke.mjs
 ```
 
-自检覆盖配置校验、启动命令行重建、工具/命令/提示段/路由注册、标记存储与接口契约（含写入者隔离），以及真实拉起一个替换子进程。
+自检覆盖配置校验、启动命令行重建、工具/命令/提示段/路由注册、标记存储与接口契约（含写入者隔离），以及真实拉起一个替换子进程。第 4 项会把返回值键集合与 `output.schema.required` 逐字比对——只断言「字段存在」抓不到「schema 已改、execute 还返回旧字段」这种半途状态。
 
 查看运行中的注册情况（宿主 Inspect）：`Tool.listTools` 应含 `restart_self`；`/api/commands/list` 应含 `restart`。
+
+> **改动本插件时的注意**：宿主会热重载被 watch 的插件文件。若一次改动拆成多次保存，watcher 可能在中间态重载，得到一个「新 schema + 旧 execute」的混合定义，表现为调用时报 `missing required property "value.…"`。改完一组相关编辑后重启一次宿主再验收，或一次保存整块。
 
 ## 投递语义
 
