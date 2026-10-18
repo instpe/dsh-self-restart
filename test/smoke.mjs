@@ -29,6 +29,7 @@ function fakeContext() {
   const routes = []
   const commands = []
   const sections = []
+  const live = []
   const webServer = {
     port: 3099,
     register(route) {
@@ -42,7 +43,11 @@ function fakeContext() {
     commands: { register(definition) { commands.push(definition); return () => {} } },
     systemPrompt: { section(section) { sections.push(section); return () => {} } },
     sessions: { flush: () => Promise.resolve(true) },
-    agents: {},
+    agents: {
+      roots: () => live,
+      get: id => live.find(agent => String(agent.session.id) === String(id)),
+      list: () => live,
+    },
     webServer,
     get(name) {
       return name === 'webServer' ? webServer : undefined
@@ -55,7 +60,7 @@ function fakeContext() {
       return callback()
     },
   }
-  return { ctx, tools, routes, commands, sections, webServer }
+  return { ctx, tools, routes, commands, sections, webServer, live }
 }
 
 /** 伪造的响应对象：记录状态码与响应体。 */
@@ -288,7 +293,46 @@ const file = markerFile(config)
   check('超期剔除与损坏隔离')
 }
 
-// 9. 进程替换链路：helper 真实拉起一个子进程
+// 9. 重启时通知其它仍在工作的会话
+{
+  const markerDir = join(root, 'notify')
+  const config = normalizeConfig({ markerDir })
+  const owner = { session: { id: 'session-owner' }, status: 'running', whenIdle: () => Promise.resolve() }
+  const busy = { session: { id: 'session-busy' }, status: 'running' }
+  const idle = { session: { id: 'session-idle' }, status: 'idle' }
+
+  const fake = fakeContext()
+  fake.live.push(owner, busy, idle)
+  apply(fake.ctx, { markerDir, readyDelayMs: 0, dryRun: true })
+  await fake.tools[0].execute({}, { agent: owner })
+  await new Promise(resolve => setTimeout(resolve, 60))
+  const entries = readEntries(markerFile(config), config.maxAgeMs)
+  assert.deepEqual(
+    entries.map(entry => entry.sessionId).sort(),
+    ['session-busy', 'session-owner'],
+    '只通知发起者与仍在运行的其它会话；空闲会话不打扰',
+  )
+  assert.equal(
+    entries.find(entry => entry.sessionId === 'session-busy').message,
+    normalizeConfig({}).resumeMessage,
+  )
+  assert.ok(entries.every(entry => entry.pid === process.pid), '续跑提示同样带写入者 pid')
+
+  // notifyActive:false 时只留发起者自己那条
+  const quietDir = join(root, 'notify-off')
+  const quiet = fakeContext()
+  quiet.live.push(owner, busy, idle)
+  apply(quiet.ctx, { markerDir: quietDir, readyDelayMs: 0, dryRun: true, notifyActive: false })
+  await quiet.tools[0].execute({}, { agent: owner })
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.deepEqual(
+    readEntries(markerFile(normalizeConfig({ markerDir: quietDir })), 600000).map(entry => entry.sessionId),
+    ['session-owner'],
+  )
+  check('活动会话续跑提示与 notifyActive 开关')
+}
+
+// 10. 进程替换链路：helper 真实拉起一个子进程
 {
   const marker = join(root, 'replaced.txt')
   const logs = { out: join(root, 'helper.out.log'), err: join(root, 'helper.err.log') }

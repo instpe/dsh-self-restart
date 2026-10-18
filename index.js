@@ -36,10 +36,16 @@ const DEFAULTS = Object.freeze({
   port: null,
   markerDir: '',
   dryRun: false,
+  notifyActive: true,
+  resumeMessage: '宿主刚刚重启（由另一会话触发），你这一轮可能被中断。请检查手上的工作，从未完成的地方继续，'
+    + '已经确认完成的部分不要重做；不需要向用户复述重启原因。',
 })
 
 /** POST 请求体的上限；标记请求仅承载一个标识。 */
 const MAX_BODY_BYTES = 64 * 1024
+
+/** 一次重启最多为多少个其它活动会话留续跑提示；防止异常多的活动会话把标记撑成一份清单。 */
+const MAX_NOTICES = 20
 
 /** 缺省等待。 */
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
@@ -70,8 +76,12 @@ export function normalizeConfig(raw) {
   const config = { ...DEFAULTS, ...source }
   if (typeof config.allowRestart !== 'boolean') throw new TypeError('self-restart: allowRestart 必须是布尔值')
   if (typeof config.dryRun !== 'boolean') throw new TypeError('self-restart: dryRun 必须是布尔值')
+  if (typeof config.notifyActive !== 'boolean') throw new TypeError('self-restart: notifyActive 必须是布尔值')
   if (typeof config.message !== 'string' || config.message.trim() === '') {
     throw new TypeError('self-restart: message 必须是非空字符串')
+  }
+  if (typeof config.resumeMessage !== 'string' || config.resumeMessage.trim() === '') {
+    throw new TypeError('self-restart: resumeMessage 必须是非空字符串')
   }
   if (typeof config.markerDir !== 'string') throw new TypeError('self-restart: markerDir 必须是字符串')
   safeInteger(config.maxAgeMs, 'maxAgeMs', 1)
@@ -158,6 +168,13 @@ function appendEntry(file, entry, maxAgeMs) {
   return entry
 }
 
+/** 追加多条标记（一次读写）。 */
+function appendEntries(file, entries, maxAgeMs) {
+  if (entries.length === 0) return []
+  writeEntries(file, [...readEntries(file, maxAgeMs), ...entries])
+  return entries
+}
+
 /** 统一的 JSON 响应。 */
 function json(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
@@ -207,7 +224,8 @@ function deliverable(entry, pid) {
 /** 常驻提示段：让模型在相关意图下想到该工具，而不只依赖 schema 被偶然读到。 */
 const GUIDANCE = 'restart_self：安排一次 dsh 宿主进程重启。调用当时进程仍在运行——重启发生在本轮回复结束之后，'
   + '返回值里的 restarted 为 false；新进程用完全相同的命令行与端口起身，重启完成后本会话会收到一条消息'
-  + '（默认「已重启」）。用户要求重启 dsh、要求让插件或配置改动生效、或你判定必须重启才能继续时，调用它。'
+  + '（默认「已重启」），重启时仍在运行的其它会话会各收到一条续跑提示，不必替它们补充说明。'
+  + '用户要求重启 dsh、要求让插件或配置改动生效、或你判定必须重启才能继续时，调用它。'
   + '调用后不要对用户宣称「已重启」，也不要再说「请重启」——消息会自己到；用户也可以直接在输入框输入 /restart。'
 
 /**
@@ -246,7 +264,8 @@ const OUTPUT_SCHEMA = {
 const PENDING_NOTE = '尚未重启。进程会在本轮回复结束、会话刷盘后被替换：先等待 afterTurnMs，'
   + '若久不静默最多等 idleTimeoutMs；helper 还要等端口释放（上限 portWaitMs），'
   + '随后的冷启动需要数秒到数十秒。本轮回复可能在替换时被截断，属正常。'
-  + '重启完成后本会话会收到 deliverAfterRestart 这条消息，不要在此前对用户宣称已重启，也不要重复调用。'
+  + '重启完成后本会话会收到 deliverAfterRestart 这条消息；重启时仍在运行的其它会话也会各收到一条续跑提示，'
+  + '因此不需要替它们补充说明。不要在此前对用户宣称已重启，也不要重复调用。'
 
 /**
  * 挂载插件：注册 `restart_self` 工具与两条标记接口。
@@ -259,6 +278,43 @@ export function apply(ctx, config) {
 
   /** 本次进程的唯一调度结果：一次进程只重启一次，重复调用回报同一份信息。 */
   let scheduled = null
+
+  /**
+   * 为「重启时仍在工作」的其它会话各留一条续跑提示。
+   *
+   * 为什么需要：重启会连同它们的轮次一起切断，而它们各自的对话并不知道发生了什么。
+   * 只在重启后的会话里留一条「已重启」是不够的——被切断的是它们的工作。
+   *
+   * 判定口径与限制：
+   * - 只取根智能体（`ctx.agents.roots()`）：子代理会话不接受续跑投递。
+   * - 只取 `status === 'running'`：空闲会话没有被打断的工作，一条提示只会打扰它。
+   * - 排除发起者本身（它有自己的 deliverAfterRestart）。
+   * - 上限 MAX_NOTICES 条：活动会话异常多时不把标记撑成清单。
+   * - 必须在临动手前一刻取快照：早取会漏掉等待期间才开始工作的会话。
+   * @param {object} initiator - 触发重启的智能体。
+   * @returns {Array<object>} 待写入的标记条目。
+   */
+  function pendingNotices(initiator) {
+    if (!resolved.notifyActive) return []
+    const notices = []
+    const seen = new Set([String(initiator.session.id)])
+    for (const other of ctx.agents.roots()) {
+      if (other === initiator || other.status !== 'running') continue
+      const sessionId = String(other.session.id)
+      if (seen.has(sessionId)) continue
+      seen.add(sessionId)
+      notices.push({
+        id: randomUUID(),
+        sessionId,
+        message: resolved.resumeMessage,
+        scheduledAt: Date.now(),
+        pid: process.pid,
+        source: 'restart_self',
+      })
+      if (notices.length >= MAX_NOTICES) break
+    }
+    return notices
+  }
 
   /**
    * 等待当前轮结束、刷盘、再替换进程。
@@ -274,6 +330,21 @@ export function apply(ctx, config) {
         warn(ctx, `flush failed: ${String(error)}`)
       }
       await sleep(resolved.readyDelayMs)
+      // 临动手前取快照，并让每个被切断的会话先刷盘，避免它的上下文停在半轮。
+      const notices = pendingNotices(agent)
+      if (notices.length > 0) {
+        for (const notice of notices) {
+          const other = ctx.agents.get(notice.sessionId)
+          if (other === undefined) continue
+          try {
+            await ctx.sessions.flush(other.session)
+          } catch (error) {
+            warn(ctx, `flush failed for ${notice.sessionId}: ${String(error)}`)
+          }
+        }
+        appendEntries(file, notices, resolved.maxAgeMs)
+        warn(ctx, `notified ${notices.length} active session(s) after restart`)
+      }
       if (resolved.dryRun) {
         warn(ctx, `dryRun: 跳过进程替换（日志 ${logs.err}）`)
         return
@@ -318,11 +389,13 @@ export function apply(ctx, config) {
   const tool = {
     name: 'restart_self',
     description: '安排一次宿主进程重启：本轮回复结束后，进程被相同命令行与端口的新进程替换。'
-      + '返回时尚未重启（restarted: false）；重启完成后本会话会收到 deliverAfterRestart 这条消息。'
+      + '返回时尚未重启（restarted: false）；重启完成后本会话会收到 deliverAfterRestart 这条消息，'
+      + '重启时仍在运行的其它会话会各收到一条续跑提示。'
       + '用户要求重启 dsh、让插件或配置改动生效，或你判定必须重启才能继续时调用。'
       + ' / Schedule an in-place restart of the host process. It happens AFTER this turn ends, so the '
       + 'immediate result reports restarted: false; the delivered text arrives in this session once the '
-      + 'new process is up. Call it when the user asks for a restart, when a change needs one to take effect, '
+      + 'new process is up, and every other session that was still running gets its own resume notice. '
+      + 'Call it when the user asks for a restart, when a change needs one to take effect, '
       + 'or when you judge a restart is required.',
     parameters: {
       type: 'object',
